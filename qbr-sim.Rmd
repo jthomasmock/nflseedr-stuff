@@ -1,0 +1,265 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r, include = FALSE}
+library(tidyverse)
+library(nflseedR)
+library(espnscrapeR)
+library(rvest)
+
+# Activate progress updates
+progressr::handlers(global = TRUE)
+
+# Parallel processing can be activated via the following line
+future::plan("multisession")
+
+```
+
+### Get QBR Data
+
+I'm getting the QBR data for all the teams, and then joining back to itself to get opponent QBR as well.
+
+I'm using Team Abbreviation (`team_abb`) so that I can use it against `nflseedR`.
+
+```{r}
+all_qbr <- 1:17 %>%
+  map_dfr(~ get_nfl_qbr(2020, week = .x))
+
+all_teams <- get_nfl_teams()
+
+all_teams %>% 
+  glimpse()
+```
+
+
+```{r}
+opp_qbr <- all_qbr %>%
+  group_by(opp_id) %>%
+  summarize(
+    opp_qbr = mean(qbr_total),
+    opp_qbr_sd = sd(qbr_total),
+    .groups = "drop"
+  ) %>%
+  left_join(all_teams, by = c("opp_id" = "uid")) %>%
+  select(team_name, team = team_short_name, opp_qbr, opp_qbr_sd) %>%
+  mutate(
+    team = case_when(
+      team == "LAR" ~ "LA",
+      team == "WSH" ~ "WAS",
+      TRUE ~ team
+    )
+  )
+
+team_qbr <- all_qbr %>%
+  group_by(team_abb) %>%
+  summarize(
+    qbr = mean(qbr_total), 
+    sd = sd(qbr_total), 
+    .groups = "drop"
+    ) %>%
+  select(team_abb, qbr, sd) %>%
+  mutate(
+    team_abb = case_when(
+      team_abb == "LAR" ~ "LA",
+      team_abb == "WSH" ~ "WAS",
+      TRUE ~ team_abb
+    )
+  )
+
+combo_qbr <- opp_qbr %>%
+  mutate(team_name = ifelse(is.na(team_name), "Football Team", team_name)) %>% 
+  left_join(team_qbr, by = c("team" = "team_abb"))
+
+combo_qbr %>% glimpse()
+```
+
+### PFR Defense
+
+We can then get PFR defensive data.
+
+```{r}
+def_url <- "https://www.pro-football-reference.com/years/2020/opp.htm"
+
+raw_html_def <- def_url %>% 
+  read_html(def_url2)
+
+def_table <- raw_html_def %>% 
+  html_nodes(xpath = '//comment()') %>%    # select comment nodes
+  html_text() %>%    # extract comment text
+  paste(collapse = '') %>%    # collapse to a single string
+  read_html() %>%   # reparse to HTML
+  html_node("table") %>% 
+  html_table() %>% 
+  janitor::clean_names()
+
+def_stats <- def_table %>% 
+  select(tm, cmp_pct = cmp_percent, pd, int, att, ypa = y_a, qb_hits, sk) %>% 
+  mutate(
+    pass_aff_rate = sum(c(pd, int, qb_hits, sk))/att,
+    team_name = word(tm, -1),
+    team_name = str_replace(team_name, "Team", "Football Team")
+  ) %>% 
+  filter(tm != "Avg Tm/G", tm != "League Total", tm != "Avg Team") %>% 
+  arrange(pass_aff_rate)
+
+def_stats
+
+def_stats %>% ggplot(aes(x = cmp_pct, y = pass_aff_rate)) + geom_point()
+```
+
+### Get game data
+
+```{r}
+all_games <- espnscrapeR::get_sharpe_data() %>% 
+  filter(season >= 2020) %>% 
+  select(game_id, week, home_team, away_team, home_score, away_score)
+
+all_games %>% 
+  glimpse()
+```
+
+
+
+### Join it all
+
+We can then join it all together.
+
+```{r}
+all_def <- def_stats %>% 
+  left_join(combo_qbr) %>% 
+  select(team, qbr, sd, opp_qbr, opp_qbr_sd, pass_aff_rate, cmp_pct:sk) %>% 
+  left_join(
+    all_games %>% select(team = home_team, score = home_score)
+  ) %>% 
+  left_join(
+    all_games %>% select(opp = home_team, score = home_score)
+  )
+
+glimpse(all_def)
+```
+
+```{r}
+all_qbr
+```
+
+```{r}
+espnscrapeR::scrape_team_stats_nfl(season = 2020, role = "defense")
+```
+
+
+```{r}
+team_qbr <- tibble::tribble(
+  ~team,             ~qbr,              ~sd,
+  "ARI",         64.13125, 18.1556132275026,
+  "ATL",          62.7625, 27.8686651994673,
+  "BAL",          67.2125, 27.2141844142597,
+  "BUF",         76.41875, 19.2849239476506,
+  "CAR",             57.7, 23.9606343822529,
+  "CHI", 52.2176470588235, 18.2376751291837,
+  "CIN",         50.76875, 30.6936414424877,
+  "CLE",         64.15625, 31.1154402989898,
+  "DAL",             60.1, 24.4207834982145,
+  "DEN", 49.7266666666667, 23.5417400335983,
+  "DET",         53.58125, 29.5742955678294,
+  "GB",         78.74375,  22.813883747987,
+  "HOU",         67.15625, 17.5588901984152,
+  "IND",         60.80625, 19.9251756579459,
+  "JAX", 44.0470588235294, 19.6204012970893,
+  "KC",         75.43125, 17.2649053960146,
+  "LAC",          63.1625,  25.481074676447,
+  "LA",          65.2125, 22.5533404768931,
+  "LV",         69.34375, 21.7053593612269,
+  "MIA", 57.7117647058824,  25.134211802664,
+  "MIN",           61.825, 21.9593715757077,
+  "NE", 44.2133333333333, 31.4544311360933,
+  "NO",            67.08, 21.1484616124064,
+  "NYG",          56.8875, 22.2589270481156,
+  "NYJ",          42.6375, 28.2156191969389,
+  "PHI", 46.0235294117647, 20.5784331707909,
+  "PIT", 51.9045454545455, 23.3777769376272,
+  "SEA",          72.3125, 20.2429205732111,
+  "SF", 47.9388888888889, 30.2798737057139,
+  "TB",             67.8, 24.7051361056765,
+  "TEN",         73.68125, 18.9875825651047,
+  "WAS", 40.7272727272727, 24.6771591115789
+)
+
+
+qbr_games_model <- function(t, g, w, ...) {
+  
+  # arguments
+  args <- list(...)
+  added_df <- ""
+  
+  if ("added_df" %in% names(args)) {
+    added_df <- args$added_df
+  }
+  
+  if(!("qbr" %in% colnames(t))){
+    t <- t %>% 
+      left_join(added_df, by = "team")
+  }
+  
+  ratings <- t %>% select(sim, team, qbr, sd)
+  
+  g <- g %>%
+    dplyr::inner_join(ratings, by = c("sim"="sim","away_team"="team")) %>%
+    dplyr::rename(away_qbr = qbr, away_sd = sd) %>%
+    dplyr::inner_join(ratings, by = c("sim"="sim","home_team"="team")) %>%
+    dplyr::rename(home_qbr = qbr, home_sd = sd) %>% 
+    mutate(weekly_home_qbr = rnorm(n = n(), mean = home_qbr, sd = home_sd)) %>%
+    mutate(weekly_away_qbr = rnorm(n = n(), mean = away_qbr, sd = away_sd)) %>%
+    mutate(
+      weekly_home_qbr = case_when(
+        weekly_home_qbr < 0 ~ abs(weekly_home_qbr),
+        weekly_home_qbr >= 100 ~ weekly_home_qbr - (weekly_home_qbr %% 100 + 1),
+        TRUE ~ weekly_home_qbr
+      ),
+      weekly_away_qbr = case_when(
+        weekly_away_qbr < 0 ~ abs(weekly_away_qbr),
+        weekly_away_qbr >= 100 ~ weekly_away_qbr - (weekly_away_qbr %% 100 + 1),
+        TRUE ~ weekly_away_qbr,
+      )
+    ) %>%
+    mutate(
+      prob_home = weekly_home_qbr / 100, 
+      prob_home = if_else(prob_home >= 1, 0.99, prob_home),
+      prob_home = if_else(is.na(prob_home), .01, prob_home),
+      prob_away = 1 - prob_home
+    ) %>%
+    rowwise() %>%
+    mutate(
+      result = case_when(
+        week != w ~ result,
+        TRUE ~ sample(
+          c(3, -3),
+          size = n(),
+          prob = eval(parse(text = glue::glue("c({prob_home},{prob_away})"))),
+          replace = TRUE
+        )
+      )
+    ) %>%
+    ungroup() %>% 
+    select(-contains("qbr"), -home_sd, -away_sd, -prob_home, -prob_away)
+  
+  # return values
+  return(list(teams = t, games = g))
+}
+
+sims3 <- simulate_nfl(
+  nfl_season = 2020,
+  process_games = qbr_games_model, 
+  fresh_season = TRUE, 
+  added_df = team_qbr,
+  simulations = 1000
+)
+
+```
+
+```{r}
+sims3$overall %>% print(n = 32)
+```
+
